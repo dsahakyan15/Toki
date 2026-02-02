@@ -1,0 +1,17 @@
+{
+  "name": "Vinyl Social",
+  "short_name": "Vinyl",
+  "description": "Music-first social network inspired by vinyl records.",
+  "start_url": "/feed",
+  "display": "standalone",
+  "background_color": "#E6D8C3",
+  "theme_color": "#696FC7",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
