@@ -1,0 +1,275 @@
+// Подключение к базе данных и генератор клиента
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// --------------------------------------
+// ENUMS (Перечисления)
+// --------------------------------------
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+enum RoomStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum NotificationType {
+  FRIEND_REQUEST      // Friend request received
+  FRIEND_ACCEPTED     // Friend request accepted
+  STORY_LIKE          // Someone liked your story
+  ROOM_INVITE         // Invited to Listen Together room
+  TRACK_ADDED         // Track added to your playlist
+}
+
+// --------------------------------------
+// MODELS (Модели данных)
+// --------------------------------------
+
+// Пользователи
+model User {
+  id           Int      @id @default(autoincrement())
+  phone        String   @unique @db.VarChar(20) // Аутентификация по номеру
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  username     String?  @db.VarChar(50)
+  avatarUrl    String?  @map("avatar_url") // Виниловый аватар, если фото нет
+  isPrivate    Boolean  @default(false) @map("is_private") // Логика приватности профиля
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Отношения
+  uploadedTracks   Track[]          @relation("UserUploads")
+  stories          Story[]
+  likes            Like[]
+  storyLikes       StoryLike[]      // Лайки историй
+  playlists        Playlist[]
+
+  // Дружба (Self-relation)
+  sentRequests     Friendship[]     @relation("Requester")
+  receivedRequests Friendship[]     @relation("Addressee")
+
+  // Комнаты (Listen Together)
+  hostedRoom       Room?            @relation("RoomHost") // Комната, которую создал юзер
+  participatingIn  RoomParticipant? // Комната, где юзер сейчас находится
+
+  // Уведомления
+  notifications    Notification[]
+
+  chatMessages     ChatMessage[]
+
+  @@map("users")
+}
+
+// Дружба
+// Реализует логику: Pending -> Accepted
+model Friendship {
+  id          Int              @id @default(autoincrement())
+  requesterId Int              @map("user_id_1")
+  addresseeId Int              @map("user_id_2")
+  status      FriendshipStatus @default(PENDING) // Статусы: pending, accepted, blocked
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  requester   User             @relation("Requester", fields: [requesterId], references: [id])
+  addressee   User             @relation("Addressee", fields: [addresseeId], references: [id])
+
+  @@unique([requesterId, addresseeId]) // Защита от дублей
+  @@map("friendships")
+}
+
+// Треки
+// Self-Hosted файлы (S3/MinIO)
+model Track {
+  id         Int     @id @default(autoincrement())
+  title      String  @db.VarChar(100)
+  artist     String  @db.VarChar(100)
+  fileUrl    String  @map("file_url") // Путь к MP3
+  coverUrl   String? @map("cover_url") // Обложка в стиле винила
+  duration   Int?    // Длительность в секундах
+  playCount  Int     @default(0) @map("play_count") // NEW: Счетчик воспроизведений для Top Charts
+  uploaderId Int?    @map("uploaded_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  uploader   User?   @relation("UserUploads", fields: [uploaderId], references: [id])
+
+  // Отношения
+  stories       Story[]
+  likes         Like[]
+  inPlaylists   PlaylistItem[]
+  inRoomQueues  RoomQueueItem[] // Треки в очередях комнат
+
+  @@map("tracks")
+}
+
+// Истории (Vinyl Stories)
+// Включают 15-30 сек отрезки треков
+model Story {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  trackId   Int      @map("track_id")
+  startTime Int      @map("start_time") // Начало отрезка (сек)
+  endTime   Int      @map("end_time")   // Конец отрезка (сек)
+  createdAt DateTime @default(now()) @map("created_at") // Для Cron-job удаления через 24ч
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  track     Track       @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  likes     StoryLike[] // NEW: Лайки истории
+
+  @@map("stories")
+}
+
+// NEW: Лайки историй
+// Отдельная модель для отслеживания кто лайкнул историю
+model StoryLike {
+  id        Int      @id @default(autoincrement())
+  storyId   Int      @map("story_id")
+  userId    Int      @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, userId]) // Один юзер может лайкнуть историю только один раз
+  @@map("story_likes")
+}
+
+// NEW: Уведомления
+// Для friend requests, story likes, room invites, etc.
+model Notification {
+  id        Int              @id @default(autoincrement())
+  userId    Int              @map("user_id") // Кому отправлено уведомление
+  type      NotificationType // Тип уведомления
+  title     String           @db.VarChar(100) // Заголовок уведомления
+  message   String?          // Опциональное сообщение
+  isRead    Boolean          @default(false) @map("is_read") // Прочитано или нет
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  // Опциональные связи для разных типов уведомлений
+  relatedUserId Int?         @map("related_user_id") // ID пользователя, связанного с уведомлением
+  relatedStoryId Int?        @map("related_story_id") // ID истории (для story likes)
+  relatedRoomId Int?         @map("related_room_id")  // ID комнаты (для room invites)
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead]) // Индекс для быстрой выборки непрочитанных уведомлений
+  @@map("notifications")
+}
+
+// Лайки треков
+// Используется для "Liked Tracks" и алгоритмической ленты
+model Like {
+  userId  Int @map("user_id")
+  trackId Int @map("track_id")
+  likedAt DateTime @default(now())
+
+  user    User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  track   Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@id([userId, trackId]) // Составной первичный ключ
+  @@map("likes")
+}
+
+// --------------------------------------
+// НОВЫЕ МОДЕЛИ (На основе Feature Specs)
+// --------------------------------------
+
+// Плейлисты (Section 4.3 - Add to Playlist)
+model Playlist {
+  id        Int      @id @default(autoincrement())
+  title     String   @db.VarChar(100)
+  creatorId Int
+  createdAt DateTime @default(now())
+
+  creator   User           @relation(fields: [creatorId], references: [id])
+  items     PlaylistItem[]
+
+  @@map("playlists")
+}
+
+// Элементы плейлиста (Связь многие-ко-многим для треков)
+model PlaylistItem {
+  id         Int      @id @default(autoincrement())
+  playlistId Int
+  trackId    Int
+  addedAt    DateTime @default(now())
+
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  track      Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@map("playlist_items")
+}
+
+// Комнаты / Listen Together (Section 4.7)
+// Реализует "Infinity Room"
+model Room {
+  id              Int        @id @default(autoincrement())
+  hostId          Int        @unique // Один хост = одна активная комната (упрощение для MVP)
+  name            String?    @db.VarChar(100) // Название комнаты
+  isActive        Boolean    @default(true)
+  queueLimit      Int        @default(20) @map("queue_limit") // NEW: Лимит треков в очереди (FIFO)
+  currentTrackId  Int?       @map("current_track_id") // NEW: ID текущего проигрываемого трека
+  currentPosition Int?       @default(0) @map("current_position") // NEW: Текущая позиция воспроизведения (секунды)
+  createdAt       DateTime   @default(now()) @map("created_at")
+
+  host         User              @relation("RoomHost", fields: [hostId], references: [id])
+  participants RoomParticipant[] // Список участников (слева в UI)
+  queue        RoomQueueItem[]   // FIFO Очередь (макс 20 треков)
+  chatMessages ChatMessage[]     // Чат комнаты
+
+  @@map("rooms")
+}
+
+// Участники комнаты
+model RoomParticipant {
+  id       Int      @id @default(autoincrement())
+  roomId   Int
+  userId   Int      @unique // Юзер может быть только в одной комнате одновременно
+  joinedAt DateTime @default(now())
+
+  // Host Logic: права на управление очередью
+  canControlQueue Boolean @default(false) @map("can_control_queue")
+
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("room_participants")
+}
+
+// Очередь воспроизведения (FIFO)
+// Логика: При добавлении 21-го трека удаляется 1-й (самый старый по addedAt)
+model RoomQueueItem {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  trackId   Int
+  addedBy   Int?     @map("added_by") // Кто добавил трек
+  position  Int      // NEW: Позиция в очереди (для явного порядка FIFO)
+  addedAt   DateTime @default(now()) @map("added_at") // Для сортировки FIFO
+  isPlaying Boolean  @default(false) @map("is_playing") // Текущий трек
+
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, position]) // Индекс для быстрой сортировки очереди
+  @@map("room_queue")
+}
+
+// Чат комнаты (Section 4.7 - Chat Overlay)
+model ChatMessage {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  userId    Int
+  content   String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@map("chat_messages")
+}
